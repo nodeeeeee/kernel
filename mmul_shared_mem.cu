@@ -1,3 +1,6 @@
+/** each 32*32 block is responsible for a 32*32 matrix in C
+ */
+
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -10,10 +13,28 @@ using std::cout;
 __global__ void mmul(int N, int M, int K, const int *a, const int *b, int *c) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x; 
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (y < N && x < M) {
-        for (int i = 0; i < K; i++) {
-            c[y * M + x] += a[y * K + i] * b[i * M + x];
+    if (x < M && y < N) {
+        const int posx = threadIdx.x;
+        const int posy = threadIdx.y;
+        const int BLOCKSIZE = 32;
+        __shared__ int As[BLOCKSIZE * BLOCKSIZE];
+        __shared__ int Bs[BLOCKSIZE * BLOCKSIZE];
+        int tmp = 0;
+        for (int blkIdx = 0; blkIdx < K; blkIdx += BLOCKSIZE) {
+            // each thread loads its corresponding piece into As and Bs
+            As[posy * BLOCKSIZE + posx] = a[y * K + blkIdx + posx];     // N * K
+            Bs[posy * BLOCKSIZE + posx] = b[blkIdx * M + posy * M + x]; // K * M
+            __syncthreads();   //syncing among all blocks (seems not necessary?)
+            // calculate
+
+            for (int i = 0; i < BLOCKSIZE; i++) {
+                tmp += As[posy * BLOCKSIZE + i] * Bs[i * BLOCKSIZE + posx];
+            }
+            __syncthreads();
         }
+        
+    
+        c[y * M + x] = tmp;
     }
 }
 
