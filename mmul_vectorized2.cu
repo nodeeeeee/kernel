@@ -1,3 +1,6 @@
+/** this version added vectorization in GMEM->SMEM and reg->GMEM. 
+ * did not transpose the matrix
+ */
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -28,17 +31,16 @@ __global__ void mmul(int N, int M, int K, const int *a, const int *b, int *c) {
             int aStartPos = blockIdx.y * BN * K + blkIdx; // we have to draw a picture to better show the coordination trasition.
             int bStartPos = blkIdx * M + blockIdx.x * BM;
             int offset = 4 * (posy * blockDim.x + posx);
-            for (int tag = 0; tag < TM * TN; tag++) {
-                As[offset + tag] = a[aStartPos + offset / BK * K + offset % BK + tag];     // N * K
-                Bs[offset + tag] = b[bStartPos + offset / BM * M + offset % BM + tag]; // K * M
-            }
+
+            reinterpret_cast<int4*>(&As[offset])[0] = reinterpret_cast<const int4*>(&a[aStartPos + offset / BK * K + offset % BK])[0];
+            reinterpret_cast<int4*>(&Bs[offset])[0] = reinterpret_cast<const int4*>(&b[bStartPos + offset / BM * M + offset % BM])[0];
             __syncthreads();   //syncing among all blocks (seems not necessary?)
             
 
             for (int dotIdx = 0; dotIdx < BK; dotIdx++) {
                 for (int i = 0; i < TN; i++) {
                     //broadcast in a warp already
-                    //每一个周期只有一个warp在运行，能够broadcast就完全不需要考虑bank conflict了，所以根本没必要transpose或者拉伸矩阵。我认为这一个版本已经优化到极限了。
+                    //每一个周期只有一个warp在运行，能够broadcast就完全不需要考虑bank conflict了，所以根本没必要transpose或者拉伸矩阵。
                     regA[i] = As[(posy * TN + i) * BK + dotIdx]; // be careful       posy * TN + i!!!!!!!!   stuck for hours
                 }
                 for (int i = 0; i < TM; i++) {
@@ -54,9 +56,14 @@ __global__ void mmul(int N, int M, int K, const int *a, const int *b, int *c) {
         }
         
         for (int i = 0; i < TM; i++) {
-            for (int j = 0; j < TN; j++) {
-                c[(y * TM + i) * M + x * TN + j] = result[i][j];
-            }
+            int2 res_vec;
+            res_vec.x = result[i][0];
+            res_vec.y = result[i][1];
+            int c_start = (y * TM + i) * M + x * TN;
+            reinterpret_cast<int2*>(&c[c_start])[0] = res_vec;
+            // for (int j = 0; j < TN; j++) {
+            //     c[(y * TM + i) * M + x * TN + j] = result[i][j];
+            // }
         }
     }
 }

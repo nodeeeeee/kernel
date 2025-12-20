@@ -19,7 +19,7 @@ __global__ void mmul(int N, int M, int K, const int *a, const int *b, int *c) {
     if (x < M && y < N) {
         const int posx = threadIdx.x;
         const int posy = threadIdx.y;
-        __shared__ int As[BN * BK];  // 64x64
+        __shared__ int As[BK * (BN + 1)];  // 64x65, addition one to resolve bank conflict when loading from GMEM
         __shared__ int Bs[BK * BM];  // 64x64
         int regA[TN]; // a col
         int regB[TM]; // a row
@@ -28,18 +28,22 @@ __global__ void mmul(int N, int M, int K, const int *a, const int *b, int *c) {
             int aStartPos = blockIdx.y * BN * K + blkIdx; // we have to draw a picture to better show the coordination trasition.
             int bStartPos = blkIdx * M + blockIdx.x * BM;
             int offset = 4 * (posy * blockDim.x + posx);
-            for (int tag = 0; tag < TM * TN; tag++) {
-                As[offset + tag] = a[aStartPos + offset / BK * K + offset % BK + tag];     // N * K
-                Bs[offset + tag] = b[bStartPos + offset / BM * M + offset % BM + tag]; // K * M
-            }
+            int offset_trans = offset % BK * (BN + 1) + offset / BK;
+            int4 tmp = reinterpret_cast<const int4*>(&a[aStartPos + offset / BK * K + offset % BK])[0];
+            // for (int tag = 0; tag < TM * TN; tag++) {
+            //     As[offset + tag] = a[aStartPos + offset / BK * K + offset % BK + tag];     // N * K
+            //     Bs[offset + tag] = b[bStartPos + offset / BM * M + offset % BM + tag]; // K * M
+            // }
+            As[offset_trans] = tmp.x;
+            As[offset_trans + BN + 1] = tmp.y;
+            As[offset_trans + 2 * (BN + 1)] = tmp.z;
+            As[offset_trans + 3 * (BN + 1)] = tmp.w;// 4 instructions, cannot merge, slow down
+            reinterpret_cast<int4*>(&Bs[offset])[0] = reinterpret_cast<const int4*>(&b[bStartPos + offset / BM * M + offset % BM])[0];
             __syncthreads();   //syncing among all blocks (seems not necessary?)
             
-
             for (int dotIdx = 0; dotIdx < BK; dotIdx++) {
                 for (int i = 0; i < TN; i++) {
-                    //broadcast in a warp already
-                    //每一个周期只有一个warp在运行，能够broadcast就完全不需要考虑bank conflict了，所以根本没必要transpose或者拉伸矩阵。我认为这一个版本已经优化到极限了。
-                    regA[i] = As[(posy * TN + i) * BK + dotIdx]; // be careful       posy * TN + i!!!!!!!!   stuck for hours
+                    regA[i] = As[dotIdx * (BN + 1) + posy * TN + i]; // be careful       posy * TN + i!!!!!!!!   stuck for hours
                 }
                 for (int i = 0; i < TM; i++) {
                     regB[i] = Bs[dotIdx * BM + posx * TM + i];

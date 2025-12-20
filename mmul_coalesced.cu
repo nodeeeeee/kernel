@@ -39,9 +39,9 @@ bool verify(int N, int M, int K, vector<int> &a, vector<int> &b, vector<int> &c)
 }
 
 int main() {
-    int N = 1<<8;
-    int M = 1<<10;
-    int K = 1<<9;
+    int N = 1<<9;
+    int M = 1<<11;
+    int K = 1<<10;
     size_t a_bytes = N * K * sizeof(int);
     size_t b_bytes = K * M * sizeof(int);
     size_t c_bytes = N * M * sizeof(int);
