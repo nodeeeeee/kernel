@@ -15,30 +15,32 @@ template<> struct VecType<float> {using type = float4; };
 template<> struct VecType<int> {using type = int4; };
 
 template<typename T>
-__global__ void mmul(int N, int M, int K, int TN, int TM, int BN, int BM, int BK, const T *a, const T *b, T *c) {
+__global__ void mmul(int N, int M, int K, const T *a, const T *b, T *c) {
     using T4 = typename VecType<T>::type;
     
-    const int x = blockIdx.x * blockDim.x + threadIdx.x; //col
-    const int y = blockIdx.y * blockDim.y + threadIdx.y; //row
-    T result[16][16] = {0};
+    const int x = blockIdx.x * blockDim.x + threadIdx.x; //32   col
+    const int y = blockIdx.y * blockDim.y + threadIdx.y; //32  row
+    //tile
+    const int TM = 2; 
+    const int TN = 2;
+    //block
+    const int BN = 64, BM = 64, BK = 64;
+    T result[TM][TN] = {0};
     if (x < M && y < N) {
         const int posx = threadIdx.x;
         const int posy = threadIdx.y;
-        extern __shared__ T shmem[];
-        T *As = shmem;
-        T *Bs = &shmem[BN * BK];
-        T regA[16]; // a col
-        T regB[16]; // a row
+        __shared__ T As[BN * BK];  // 64x64
+        __shared__ T Bs[BK * BM];  // 64x64
+        T regA[TN]; // a col
+        T regB[TM]; // a row
         for (int blkIdx = 0; blkIdx < K; blkIdx += BK) {
             // each thread loads its corresponding piece into As and Bs
             int aStartPos = blockIdx.y * BN * K + blkIdx; // we have to draw a picture to better show the coordination trasition.
             int bStartPos = blkIdx * M + blockIdx.x * BM;
-            for (int i = 0; i < TN * TM * BK / BM; i += 4) {
-                int offset = (TM * TN) * BK / BM * (posy * blockDim.x + posx) + i;
-                reinterpret_cast<T4*>(&As[offset])[0] = reinterpret_cast<const T4*>(&a[aStartPos + offset / BK * K + offset % BK])[0];
-                reinterpret_cast<T4*>(&Bs[offset])[0] = reinterpret_cast<const T4*>(&b[bStartPos + offset / BM * M + offset % BM])[0];
-            }
+            int offset = 4 * (posy * blockDim.x + posx);
 
+            reinterpret_cast<T4*>(&As[offset])[0] = reinterpret_cast<const T4*>(&a[aStartPos + offset / BK * K + offset % BK])[0];
+            reinterpret_cast<T4*>(&Bs[offset])[0] = reinterpret_cast<const T4*>(&b[bStartPos + offset / BM * M + offset % BM])[0];
             __syncthreads();   //syncing among all blocks (seems not necessary?)
             
 
@@ -95,42 +97,6 @@ bool verify(int N, int M, int K, vector<T> &a, vector<T> &b, vector<T> &c) {
     return true;
 }
 
-template<typename T>
-void run(int N, int M, int K, int  TN, int TM, int BN, int BM, int BK, T* d_a, T* d_b, T* d_c, vector<T> h_a, vector<T> h_b, vector<T> h_c) {
-    size_t c_bytes = N * M * sizeof(float);
-    dim3 gridDim(CEIL_DIV(M, BM), CEIL_DIV(N, BN));   //dim3(x, y, z)    x: col   y: row
-    dim3 blockDim(BM / TM, BN / TN); //32 col, 32 row
-    int shmem_size = (BN * BK + BK * BM) * sizeof(T);
-    cudaMemset(d_c, 0, c_bytes);
-    if (shmem_size > 49152) {
-        return ;
-    }
-    float milliseconds = 0;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
-    mmul<float><<<gridDim, blockDim, shmem_size>>>(N, M, K, TN, TM, BN, BM, BK, d_a, d_b, d_c); // grid should be N * M
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    printf("Kernel execution time: %f ms\n", milliseconds);
-
-    // 7. 销毁事件资源
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-
-    cudaMemcpy(h_c.data(), d_c, c_bytes, cudaMemcpyDeviceToHost);
-    cout << "MMUL DONE\n";
-    printf("TN: %d, TM: %d, BN: %d, BM: %d, BK: %d\n", TN, TM, BN, BM, BK);
-    // assert(verify<float>(N, M, K, h_a, h_b, h_c) == true);
-
-    // cout << "COMPLETED SUCCESSFULLY\n";
-
-
-    return ;
-}
-
 int main() {
     int N = 1<<9;
     int M = 1<<11;
@@ -153,26 +119,20 @@ int main() {
     cudaMemcpy(d_b, h_b.data(), b_bytes, cudaMemcpyHostToDevice);
     cudaMemset(d_c, 0, c_bytes);
 
-    // printf("START TEST:\n---------------\n");
-    // run<float>(N, M, K, 2, 2, 32, 32, 32, d_a, d_b, d_c, h_a, h_b, h_c);
-    // printf("TEST DONE\n");
+    dim3 gridDim(CEIL_DIV(M, 64), CEIL_DIV(N, 64));   //dim3(x, y, z)    x: col   y: row
+    dim3 blockDim(32, 32); //32 col, 32 row
 
-    for (int TM = 2; TM <= 16; TM *= 2) {
-        int TN = TM;
-        for (int BK = 8; BK <= min(128, TM * 32); BK *= 2) {
-            for (int BN = 32; BN <= min(128, BK * TN * TM / 4); BN *= 2) {
-                int BM = BN;
-                run<float>(N, M, K, TN, TM, BN, BM, BK, d_a, d_b, d_c, h_a, h_b, h_c);
-            }
-        }
-    }
+    mmul<float><<<gridDim, blockDim>>>(N, M, K, d_a, d_b, d_c); // grid should be N * M
+
+    cudaMemcpy(h_c.data(), d_c, c_bytes, cudaMemcpyDeviceToHost);
+    cout << "MMUL DONE\n";
+    assert(verify(N, M, K, h_a, h_b, h_c) == true);
+    
+    cout << "COMPLETED SUCCESSFULLY";
+
     cudaFree(d_a);
     cudaFree(d_b);
     cudaFree(d_c);
-
     return 0;
 
 }
-
-
-// TN: 4 TM: 4 BN: 64 BM: 64 BK: 16
