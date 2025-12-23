@@ -117,6 +117,12 @@ float run(int N, int M, int K, int  TN, int TM, int BN, int BM, int BK, int WNIT
     if (shmem_size > 49152) {
         return 1000000;
     }
+    //warm up run
+    printf("warm up\n");
+    mmul<float><<<gridDim, blockDim, shmem_size>>>(N, M, K, TN, TM, BN, BM, BK, WNITER, WMITER, d_a, d_b, d_c); // grid should be N * M
+    mmul<float><<<gridDim, blockDim, shmem_size>>>(N, M, K, TN, TM, BN, BM, BK, WNITER, WMITER, d_a, d_b, d_c); // grid should be N * M
+
+    printf("warm up done\n");
     float milliseconds = 0;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
